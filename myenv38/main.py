@@ -1,17 +1,26 @@
-﻿# Sistema de Reconhecimento Facial com Armazenamento em Arquivos
-# Instalar bibliotecas necessárias:
-# !pip install face-recognition opencv-python numpy pillow
+﻿# ==================== IMPORTAÇÕES ====================
+# Instalar bibliotecas:
+# pip install flask flask-cors face-recognition numpy pillow opencv-python
 
 import face_recognition
-import cv2
+import cv2  # Usado apenas para salvar/ler imagens, não para UI
 import numpy as np
 import pickle
 import os
-from PIL import Image
+from PIL import Image  # Melhor para ler streams de imagem do que OpenCV
 from datetime import datetime
 
+# Importações do Flask
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 
-# ==================== CONFIGURAÇÃO DE ARMAZENAMENTO ====================
+# ==================== CONFIGURAÇÃO DO APP FLASK ====================
+app = Flask(__name__)
+CORS(app)
+
+
+# ==================== CLASSE DE ARMAZENAMENTO ====================
+# (Sua classe estava ótima, quase não mudei nada)
 
 class FaceStorage:
     """Classe para gerenciar o armazenamento de rostos em arquivos"""
@@ -21,6 +30,7 @@ class FaceStorage:
         self.fotos_dir = os.path.join(models_dir, "fotos")
         self.encodings_dir = os.path.join(models_dir, "encodings")
         self.create_directories()
+        print(f"✓ Storage inicializado. Pastas em: {self.models_dir}")
 
     def create_directories(self):
         """Cria as pastas necessárias se não existirem"""
@@ -31,7 +41,7 @@ class FaceStorage:
     def adicionar_usuario(self, nome, encoding, foto_array):
         """Salva o encoding e a foto do usuário"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        base_filename = f"{nome}_{timestamp}"
+        base_filename = f"{nome.lower().replace(' ', '_')}_{timestamp}"
 
         # Salva o encoding como arquivo pickle
         encoding_path = os.path.join(self.encodings_dir, f"{base_filename}.pkl")
@@ -44,24 +54,20 @@ class FaceStorage:
 
         # Salva a foto
         foto_path = os.path.join(self.fotos_dir, f"{base_filename}.jpg")
-        cv2.imwrite(foto_path, foto_array)
+        cv2.imwrite(foto_path, foto_array)  # cv2.imwrite é ótimo para isso
 
         print(f"✓ Usuário '{nome}' cadastrado com sucesso!")
-        print(f"  - Encoding: {encoding_path}")
-        print(f"  - Foto: {foto_path}")
+        return {"status": "success", "nome": nome, "arquivo_pkl": f"{base_filename}.pkl"}
 
     def carregar_todos_usuarios(self):
         """Carrega todos os encodings salvos"""
         usuarios = []
-
-        # Lista todos os arquivos .pkl na pasta de encodings
         if not os.path.exists(self.encodings_dir):
             return usuarios
 
         for filename in os.listdir(self.encodings_dir):
             if filename.endswith('.pkl'):
                 filepath = os.path.join(self.encodings_dir, filename)
-
                 try:
                     with open(filepath, 'rb') as f:
                         data = pickle.load(f)
@@ -73,333 +79,182 @@ class FaceStorage:
                         })
                 except Exception as e:
                     print(f"⚠️  Erro ao carregar {filename}: {e}")
-
         return usuarios
 
+    # Este método agora é chamado pela API, não tem mais o decorator @app.route
     def remover_usuario(self, arquivo):
-        """Remove um usuário pelo nome do arquivo"""
+        """Remove um usuário pelo nome do arquivo pkl"""
         encoding_path = os.path.join(self.encodings_dir, arquivo)
 
         if os.path.exists(encoding_path):
-            # Remove o encoding
             os.remove(encoding_path)
-
-            # Tenta remover a foto correspondente
             base_name = arquivo.replace('.pkl', '')
             foto_path = os.path.join(self.fotos_dir, f"{base_name}.jpg")
             if os.path.exists(foto_path):
                 os.remove(foto_path)
-
             print(f"✓ Usuário removido: {arquivo}")
+            return True
         else:
             print(f"❌ Arquivo não encontrado: {arquivo}")
-
-    def listar_usuarios(self):
-        """Lista todos os usuários cadastrados"""
-        usuarios = self.carregar_todos_usuarios()
-
-        if len(usuarios) == 0:
-            print("\n📋 Nenhum usuário cadastrado")
-            return usuarios
-
-        print(f"\n📋 Usuários cadastrados ({len(usuarios)}):")
-        print("-" * 70)
-        for idx, usuario in enumerate(usuarios, 1):
-            print(f"{idx}. Nome: {usuario['nome']}")
-            print(f"   Arquivo: {usuario['arquivo']}")
-            print(f"   Cadastro: {usuario['data_cadastro']}")
-            print("-" * 70)
-
-        return usuarios
+            return False
 
 
-# ==================== FUNÇÕES DE RECONHECIMENTO FACIAL ====================
+# ==================== INSTÂNCIA GLOBAL DO STORAGE ====================
+# Cria uma instância única da classe para ser usada pelos endpoints
+storage = FaceStorage()
 
-def cadastrar_rosto_da_webcam(nome, storage):
-    """Captura foto da webcam e cadastra na pasta"""
-    print(f"\n📸 Preparando para cadastrar '{nome}'...")
-    print("Pressione ESPAÇO para capturar a foto")
-    print("Pressione ESC para cancelar")
 
-    cap = cv2.VideoCapture(0)
-    foto_capturada = None
+# ==================== ENDPOINTS DA API FLASK ====================
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("❌ Erro ao acessar a webcam")
-            break
+@app.route('/register', methods=['POST'])
+def api_register():
+    """
+    Endpoint para cadastrar um novo rosto.
+    Recebe um formulário com 'nome' (texto) e 'photo' (arquivo de imagem).
+    """
+    print("\nRecebendo requisição em /register...")
 
-        # Detecta rostos em tempo real para feedback visual
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        face_locations = face_recognition.face_locations(rgb_frame)
+    # Validação da requisição
+    if 'photo' not in request.files or 'nome' not in request.form:
+        return jsonify({"status": "error", "message": "Requisição inválida. Envie 'nome' e 'photo'."}), 400
 
-        # Desenha retângulos nos rostos detectados
-        display_frame = frame.copy()
-        for (top, right, bottom, left) in face_locations:
-            cv2.rectangle(display_frame, (left, top), (right, bottom), (0, 255, 0), 2)
+    nome = request.form['nome']
+    file_stream = request.files['photo']  # Arquivo da requisição
 
-        # Mostra contador de rostos
-        cv2.putText(display_frame, f"Rostos detectados: {len(face_locations)}",
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+    if not nome:
+        return jsonify({"status": "error", "message": "Nome não pode ser vazio."}), 400
 
-        cv2.imshow('Cadastro - Pressione ESPACO para capturar', display_frame)
-
-        key = cv2.waitKey(1) & 0xFF
-
-        # ESPAÇO para capturar
-        if key == 32:
-            foto_capturada = frame.copy()
-            break
-        # ESC para cancelar
-        elif key == 27:
-            print("❌ Cadastro cancelado")
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()
-
-    if foto_capturada is not None:
-        # Converte BGR (OpenCV) para RGB (face_recognition)
-        rgb_frame = cv2.cvtColor(foto_capturada, cv2.COLOR_BGR2RGB)
+    try:
+        # Carrega a imagem do stream usando PIL e converte para RGB
+        image_pil = Image.open(file_stream)
+        image_rgb = np.array(image_pil.convert('RGB'))
 
         # Detecta o rosto e gera o encoding
-        face_locations = face_recognition.face_locations(rgb_frame)
+        face_locations = face_recognition.face_locations(image_rgb)
 
         if len(face_locations) == 0:
-            print("❌ Nenhum rosto detectado! Tente novamente com melhor iluminação.")
-            return False
-
+            print("❌ Nenhum rosto detectado!")
+            return jsonify({"status": "error", "message": "Nenhum rosto detectado na imagem."}), 400
         if len(face_locations) > 1:
-            print("⚠️  Múltiplos rostos detectados! Certifique-se de que apenas uma pessoa está na imagem.")
-            return False
+            print("⚠️  Múltiplos rostos detectados!")
+            return jsonify({"status": "error", "message": "Múltiplos rostos detectados. Envie apenas um."}), 400
 
-        face_encoding = face_recognition.face_encodings(rgb_frame, face_locations)[0]
+        face_encoding = face_recognition.face_encodings(image_rgb, face_locations)[0]
 
-        # Salva o usuário
-        storage.adicionar_usuario(nome, face_encoding, foto_capturada)
-        return True
+        # Converte para BGR (formato do OpenCV) para salvar a foto
+        image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
 
-    return False
+        # Salva o usuário usando nossa classe
+        resultado = storage.adicionar_usuario(nome, face_encoding, image_bgr)
+        return jsonify(resultado), 201  # 201 = Created
 
-
-def cadastrar_rosto_de_arquivo(nome, caminho_imagem, storage):
-    """Cadastra um rosto a partir de um arquivo de imagem"""
-    print(f"\n📸 Cadastrando '{nome}' da imagem: {caminho_imagem}")
-
-    if not os.path.exists(caminho_imagem):
-        print(f"❌ Arquivo não encontrado: {caminho_imagem}")
-        return False
-
-    # Carrega a imagem
-    imagem = face_recognition.load_image_file(caminho_imagem)
-
-    # Detecta rostos
-    face_locations = face_recognition.face_locations(imagem)
-
-    if len(face_locations) == 0:
-        print("❌ Nenhum rosto detectado na imagem!")
-        return False
-
-    if len(face_locations) > 1:
-        print("⚠️  Múltiplos rostos detectados! Use uma imagem com apenas uma pessoa.")
-        return False
-
-    # Gera o encoding
-    face_encoding = face_recognition.face_encodings(imagem, face_locations)[0]
-
-    # Converte para BGR para salvar com OpenCV
-    imagem_bgr = cv2.cvtColor(imagem, cv2.COLOR_RGB2BGR)
-
-    # Salva o usuário
-    storage.adicionar_usuario(nome, face_encoding, imagem_bgr)
-    return True
+    except Exception as e:
+        print(f"❌ Erro interno: {e}")
+        return jsonify({"status": "error", "message": f"Erro interno no servidor: {e}"}), 500
 
 
-def validar_rosto_webcam(storage, tolerancia=0.6, mostrar_confianca=True):
-    """Valida rosto em tempo real pela webcam"""
-    print("\n🔍 Iniciando validação facial...")
-    print("Pressione ESC para sair")
+@app.route('/checkin', methods=['POST'])
+def api_checkin():
+    """
+    Endpoint para validar um rosto (fazer a chamada).
+    Recebe um formulário com 'photo' (arquivo de imagem da câmera).
+    """
+    print("\nRecebendo requisição em /checkin...")
 
-    # Carrega usuários da pasta
+    if 'photo' not in request.files:
+        return jsonify({"status": "error", "message": "Requisição inválida. Envie 'photo'."}), 400
+
+    # 1. Carrega usuários cadastrados
     usuarios = storage.carregar_todos_usuarios()
-
     if len(usuarios) == 0:
-        print("❌ Nenhum usuário cadastrado! Use a opção 1 ou 2 para cadastrar.")
-        return
+        return jsonify({"status": "error", "message": "Nenhum usuário cadastrado no sistema."}), 400
 
     known_encodings = [u['encoding'] for u in usuarios]
     known_names = [u['nome'] for u in usuarios]
 
-    print(f"✓ {len(usuarios)} usuário(s) carregado(s) da pasta face-models")
+    # 2. Processa a foto enviada
+    file_stream = request.files['photo']
+    try:
+        image_pil = Image.open(file_stream)
+        image_rgb = np.array(image_pil.convert('RGB'))
 
-    cap = cv2.VideoCapture(0)
+        # Detecta rostos na imagem
+        face_locations = face_recognition.face_locations(image_rgb)
+        face_encodings = face_recognition.face_encodings(image_rgb, face_locations)
 
-    # Processa a cada 2 frames para melhor performance
-    process_frame = 0
+        if len(face_encodings) == 0:
+            return jsonify({"status": "not_found", "message": "Nenhum rosto detectado."})
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+        # Pega o primeiro rosto encontrado
+        unknown_encoding = face_encodings[0]
 
-        process_frame += 1
+        # 3. Compara o rosto com o banco de dados
+        matches = face_recognition.compare_faces(known_encodings, unknown_encoding, tolerance=0.6)
+        face_distances = face_recognition.face_distance(known_encodings, unknown_encoding)
 
-        # Processa apenas alguns frames
-        if process_frame % 2 == 0:
-            # Reduz o tamanho para processamento mais rápido
-            small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
-            rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
+        best_match_index = np.argmin(face_distances)
 
-            # Detecta rostos
-            face_locations = face_recognition.face_locations(rgb_small_frame)
-            face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
+        if matches[best_match_index]:
+            nome = known_names[best_match_index]
+            confidence = (1 - face_distances[best_match_index]) * 100
 
-            face_names = []
-            face_confidences = []
+            print(f"✓ Rosto reconhecido: {nome} (Conf: {confidence:.2f}%)")
 
-            for face_encoding in face_encodings:
-                # Compara com rostos conhecidos
-                matches = face_recognition.compare_faces(known_encodings, face_encoding, tolerance=tolerancia)
-                name = "Desconhecido"
-                confidence = 0
+            # (Aqui você salvaria a presença no banco de dados)
 
-                # Usa a distância para encontrar a melhor correspondência
-                face_distances = face_recognition.face_distance(known_encodings, face_encoding)
-
-                if len(face_distances) > 0:
-                    best_match_index = np.argmin(face_distances)
-
-                    if matches[best_match_index]:
-                        name = known_names[best_match_index]
-                        # Converte distância em porcentagem de confiança
-                        confidence = (1 - face_distances[best_match_index]) * 100
-
-                face_names.append(name)
-                face_confidences.append(confidence)
-
-            # Desenha os resultados
-            for (top, right, bottom, left), name, confidence in zip(face_locations, face_names, face_confidences):
-                # Escala as coordenadas de volta ao tamanho original
-                top *= 4
-                right *= 4
-                bottom *= 4
-                left *= 4
-
-                # Define cor: verde se reconhecido, vermelho se desconhecido
-                color = (0, 255, 0) if name != "Desconhecido" else (0, 0, 255)
-
-                # Desenha retângulo ao redor do rosto
-                cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
-
-                # Desenha label com nome
-                cv2.rectangle(frame, (left, bottom - 35), (right, bottom), color, cv2.FILLED)
-
-                # Texto com nome e confiança
-                if mostrar_confianca and name != "Desconhecido":
-                    label = f"{name} ({confidence:.1f}%)"
-                else:
-                    label = name
-
-                cv2.putText(frame, label, (left + 6, bottom - 6),
-                            cv2.FONT_HERSHEY_DUPLEX, 0.6, (255, 255, 255), 1)
-
-        # Mostra informações no topo
-        info_text = f"Usuarios cadastrados: {len(usuarios)} | Pressione ESC para sair"
-        cv2.putText(frame, info_text, (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-
-        # Mostra o frame
-        cv2.imshow('Validacao Facial', frame)
-
-        if cv2.waitKey(1) & 0xFF == 27:
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()
-
-
-# ==================== MENU PRINCIPAL ====================
-
-def menu_principal():
-    """Menu interativo do sistema"""
-    storage = FaceStorage()
-
-    while True:
-        print("\n" + "=" * 50)
-        print("🔐 SISTEMA DE RECONHECIMENTO FACIAL")
-        print("=" * 50)
-        print("1. Cadastrar rosto (Webcam)")
-        print("2. Cadastrar rosto (Arquivo)")
-        print("3. Validar rosto (Webcam)")
-        print("4. Listar usuários")
-        print("5. Remover usuário")
-        print("6. Ver estatísticas")
-        print("0. Sair")
-        print("=" * 50)
-
-        opcao = input("Escolha uma opção: ").strip()
-
-        if opcao == "1":
-            nome = input("Digite o nome da pessoa: ").strip()
-            if nome:
-                cadastrar_rosto_da_webcam(nome, storage)
-            else:
-                print("❌ Nome inválido!")
-
-        elif opcao == "2":
-            nome = input("Digite o nome da pessoa: ").strip()
-            caminho = input("Digite o caminho da imagem: ").strip()
-            if nome and caminho:
-                cadastrar_rosto_de_arquivo(nome, caminho, storage)
-            else:
-                print("❌ Informações inválidas!")
-
-        elif opcao == "3":
-            validar_rosto_webcam(storage)
-
-        elif opcao == "4":
-            storage.listar_usuarios()
-
-        elif opcao == "5":
-            usuarios = storage.listar_usuarios()
-            if usuarios:
-                try:
-                    idx = int(input("\nDigite o número do usuário para remover: ")) - 1
-                    if 0 <= idx < len(usuarios):
-                        storage.remover_usuario(usuarios[idx]['arquivo'])
-                    else:
-                        print("❌ Número inválido!")
-                except ValueError:
-                    print("❌ Entrada inválida!")
-
-        elif opcao == "6":
-            usuarios = storage.carregar_todos_usuarios()
-            print(f"\n📊 Estatísticas:")
-            print(f"  - Total de usuários: {len(usuarios)}")
-            print(f"  - Pasta de modelos: {storage.models_dir}")
-            print(f"  - Encodings: {len(os.listdir(storage.encodings_dir))} arquivos")
-            print(f"  - Fotos: {len(os.listdir(storage.fotos_dir))} arquivos")
-
-        elif opcao == "0":
-            print("\n👋 Encerrando sistema...")
-            break
-
+            return jsonify({
+                "status": "success",
+                "nome": nome,
+                "confidence": f"{confidence:.2f}%"
+            })
         else:
-            print("❌ Opção inválida!")
+            print("❌ Rosto não reconhecido.")
+            return jsonify({"status": "not_found", "message": "Desconhecido"})
+
+    except Exception as e:
+        print(f"❌ Erro interno: {e}")
+        return jsonify({"status": "error", "message": f"Erro interno no servidor: {e}"}), 500
+
+
+@app.route('/users', methods=['GET'])
+def api_list_users():
+    """Endpoint para listar todos os usuários cadastrados."""
+    usuarios = storage.carregar_todos_usuarios()
+
+    # Limpa os encodings (que são dados binários) antes de enviar como JSON
+    lista_limpa = []
+    for u in usuarios:
+        lista_limpa.append({
+            "nome": u['nome'],
+            "data_cadastro": u['data_cadastro'],
+            "arquivo": u['arquivo']  # O 'arquivo' é o ID único para remoção
+        })
+
+    return jsonify(lista_limpa)
+
+
+@app.route('/users/delete', methods=['POST'])
+def api_delete_user():
+    """
+    Endpoint para remover um usuário.
+    Recebe um JSON com o campo 'arquivo'. Ex: {"arquivo": "nome_timestamp.pkl"}
+    """
+    data = request.get_json()
+    if not data or 'arquivo' not in data:
+        return jsonify({"status": "error", "message": "Envie um JSON com a chave 'arquivo'."}), 400
+
+    arquivo_pkl = data['arquivo']
+
+    if storage.remover_usuario(arquivo_pkl):
+        return jsonify({"status": "success", "message": f"Usuário {arquivo_pkl} removido."})
+    else:
+        return jsonify({"status": "error", "message": f"Usuário {arquivo_pkl} não encontrado."}), 404
 
 
 # ==================== EXECUÇÃO ====================
 
 if __name__ == "__main__":
-    # Verifica se as bibliotecas estão instaladas
-    try:
-        import face_recognition
-        import cv2
-
-        print("✓ Bibliotecas carregadas com sucesso!")
-        menu_principal()
-    except ImportError as e:
-        print(f"❌ Erro ao importar bibliotecas: {e}")
-        print("\nInstale as dependências com:")
-        print("pip install face-recognition opencv-python numpy pillow")
+    print("Iniciando servidor Flask...")
+    # host='0.0.0.0' permite que o servidor seja acessado
+    # por outros dispositivos na mesma rede (ex: seu tablet)
+    app.run(debug=True, host='0.0.0.0', port=5000)
